@@ -491,7 +491,8 @@ async function fillGemini(cdp, text) {
     .evaluate(`navigator.clipboard.writeText(${JSON.stringify(text)}).then(() => true).catch((error) => 'err:' + error.message)`)
     .catch((error) => 'ex:' + error.message)
   if (wrote) {
-    for (const type of ['rawKeyDown', 'keyDown', 'keyUp']) {
+    /* 只发 rawKeyDown + keyUp：再补一个 keyDown 会让 Ctrl+V 触发两次粘贴，整份内容变两遍（2026-11-25 实测 830/434） */
+    for (const type of ['rawKeyDown', 'keyUp']) {
       await cdp.send('Input.dispatchKeyEvent', { type, key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 }).catch(() => {})
       await sleep(120)
     }
@@ -518,21 +519,17 @@ async function fillGemini(cdp, text) {
     return (!head || content.includes(head.replace(/\s+/g, ''))) && (!tail || content.includes(tail.replace(/\s+/g, '')))
   }
 
-  if (length < String(text).length * 0.5 || !(await looksWhole())) {
-    /* 重填前必须确认是空的：上一次就是 Ctrl+A 失败、这里直接逐段追加，整份变成两遍 */
-    const leftNow = await clear()
-    if (leftNow > 5) {
-      fillDebug += ' →清空失败剩 ' + leftNow + ' 字，放弃重填'
-      return -1
-    }
-    await typeByParagraph()
-    await sleep(700)
-    length = await cdp.evaluate(EDITOR_LENGTH_GEMINI).catch(() => -1)
-    fillDebug += ' →逐段重填=' + length
-    if (!(await looksWhole())) {
-      fillDebug += ' →重填后首尾仍不匹配，放弃发送'
-      return -1
-    }
+  /* 粘贴后只校验、不重填。
+     2026-11-25 实测：自动重填把 407 字的提示词变成 814 字（叠两遍），因为 Quill 里"清空"读数不可靠。
+     宁可让这一条失败（日志写明长度），也绝不发出去两遍。 */
+  const expected = String(text).length
+  if (length < expected * 0.9 || length > expected * 1.2) {
+    fillDebug += ' → 长度异常（' + length + '/' + expected + '），不重填，本条中止'
+    return -1
+  }
+  if (!(await looksWhole())) {
+    fillDebug += ' → 首尾对不上，不重填，本条中止'
+    return -1
   }
   return length
 }
@@ -661,7 +658,7 @@ async function inspectEditor(cdp, text) {
   if (want.length > 0 && got.length > want.length * 1.4) {
     reasons.push('长度多出 ' + Math.round((got.length / want.length - 1) * 100) + '%（疑似叠了两遍）')
   }
-  if (wantParas > 1 && gotParas + 2 < wantParas) reasons.push('段落数少了（期望 ' + wantParas + '，实际 ' + gotParas + '）')
+  /* 段落数只记录、不拦：Gemini 的 Quill 里 innerText 常把整段压成一行，用它硬拦会把填对的活生生判成失败（2026-11-25 实测踩到：长度 407/407 完全一致，只因段落读成 1 段就被中止） */
   return { ok: reasons.length === 0, reason: reasons.join('；'), gotLen: got.length, wantLen: want.length, wantParas, gotParas }
 }
 
@@ -982,6 +979,15 @@ export function buildPrompt(job, part) {
   const strictFormat = options.strictFormat === true
   formatRules.push('保持原文分段，不要并成一大坨。')
   formatRules.push('段首空两格。')
+  formatRules.push('不要用破折号。')
+  /* 量化分段：粘贴问题修好后提示词长一点没关系，光说「保持分段」模型照样并 */
+  const inputParas = String(part.text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '').length
+  if (inputParas > 1) {
+    formatRules.push('本段原文分成 ' + inputParas + ' 个自然段，改写后至少保留 ' + Math.max(2, Math.ceil(inputParas * 0.6)) + ' 段，段与段之间空一行。')
+  }
   const maxInflation = Number(options.maxInflation) > 0 ? Number(options.maxInflation) : 0
   if (maxInflation > 0) {
     formatRules.push('篇幅不要超过原文的 ' + Math.round((1 + maxInflation) * 100) + '%，不做扩写。')

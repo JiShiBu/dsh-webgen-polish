@@ -1,6 +1,6 @@
 {
   "name": "dsh-webgen-polish",
-  "version": "4.3.11",
+  "version": "4.3.15",
   "type": "module",
   "description": "网页版分段润色（只做文字）：DeepSeek / Gemini / Venice 三后端并行，整段不切、阻塞等待、跨段重复检测与硬约束自检。生图已分离到 dsh-venice-image。",
   "exports": {
