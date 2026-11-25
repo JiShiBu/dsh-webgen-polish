@@ -11,6 +11,7 @@
  * 3. 超时也把已收到的内容落盘（标 unfinished），不白等。
  * 4. 单条硬超时默认 900 秒（旧脚本 300 秒，1200 字改稿常常不够）。
  */
+import { execFile } from 'node:child_process'
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -641,13 +642,23 @@ async function clickSend(cdp) {
  */
 /** 发送前硬校验：编辑器里的内容必须就是这一份（开头、结尾、长度、段落数）。
  *  任何一项不过就不发 —— 宁可这一段报错，也不发两遍。 */
-async function inspectEditor(cdp, text) {
-  const content = await cdp
-    .evaluate(`(() => {
-      const ed = document.querySelector('rich-textarea .ql-editor[contenteditable="true"], .ql-editor[contenteditable="true"]');
-      return ed ? (ed.innerText || ed.textContent || '') : '';
-    })()`)
-    .catch(() => '')
+async function inspectEditor(cdp, text, site) {
+  /* 两个站的输入框结构完全不同：Gemini 是 Quill（rich-textarea/.ql-editor），
+     DeepSeek 是 textarea/#chat-input。2026-11-25 实测：用 Gemini 的选择器去读 DS，永远读到空，
+     于是「填对了也判成编辑器是空的」，DS 整条链路被这道校验拦死。 */
+  const isGemini = String((site && site.match) || '').includes('gemini')
+  const readScript = isGemini
+    ? `(() => {
+        const ed = document.querySelector('rich-textarea .ql-editor[contenteditable="true"], .ql-editor[contenteditable="true"]');
+        return ed ? (ed.innerText || ed.textContent || '') : '';
+      })()`
+    : `(() => {
+        const ed = document.querySelector('textarea, [contenteditable="true"], #chat-input');
+        if (!ed) return '';
+        if (typeof ed.value === 'string' && ed.value !== '') return ed.value;
+        return ed.innerText || ed.textContent || '';
+      })()`
+  const content = await cdp.evaluate(readScript).catch(() => '')
   const norm = (value) => String(value || '').replace(/\s+/g, '')
   const got = norm(content)
   const want = norm(text)
@@ -671,7 +682,7 @@ async function sendPrompt(cdp, text, before, probeScript, site) {
   if (typed <= 0) throw new Error('文字没能填进输入框' + (fillDebug ? '（' + fillDebug + '）' : '（页面可能还在加载）') + '，本条未发送')
 
   /* 硬校验：三项全过才允许发送（作者 2026-11-25 定的规矩） */
-  const check = await inspectEditor(cdp, text)
+  const check = await inspectEditor(cdp, text, site)
   if (!check.ok) {
     throw new Error('填进去的内容不对，本条中止（' + check.reason + '；长度 ' + check.gotLen + '/' + check.wantLen + '，段落 ' + check.gotParas + '/' + check.wantParas + '）')
   }
@@ -846,6 +857,26 @@ function cleanOutput(site, text, options = {}) {
   return normalized.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\s+$/, '')
 }
 
+/** CDP 的 Page.bringToFront 只能切标签，切不动「被压在别的窗口后面」的 Chrome；
+ *  这里直接调 Win32 把它提到前台（Windows 专用，失败静默）。 */
+function bringChromeToFront() {
+  return new Promise((resolvePromise) => {
+    if (process.platform !== 'win32') {
+      resolvePromise(false)
+      return
+    }
+    const script = [
+      "$p = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1",
+      'if ($p) {',
+      "  Add-Type -Namespace W -Name U -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'",
+      '  [W]::U::ShowWindow($p.MainWindowHandle, 9) | Out-Null',
+      '  [W]::U::SetForegroundWindow($p.MainWindowHandle) | Out-Null',
+      '}',
+    ].join('\n')
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 8000 }, () => resolvePromise(true))
+  })
+}
+
 async function waitForReply(cdp, before, part, job) {
   const probeScript = (job.site || siteOf(job.options.backend)).probe
   const deadline = Date.now() + job.options.timeoutSec * 1000
@@ -853,6 +884,7 @@ async function waitForReply(cdp, before, part, job) {
   let stable = 0
   let latest = ''
   let lastFront = 0
+  let hiddenSince = 0
   let diagMains = -1
   let diagLen = -1
   let diagVis = ''
@@ -910,17 +942,49 @@ async function waitForReply(cdp, before, part, job) {
     /* 完成判定：内容连续 4 次不变就算收工。
        minChars 只作"够不够像一则正经回复"的参考 —— 短回复（比如只回了几个字）
        等满 8 次仍不变也照收，否则会像旧脚本那样一直等到超时。 */
-    if (stable >= 4) {
+    /* 流式还没结束就不算收工：Gemini 的正文是逐段渲染的，
+   曾经在只吐出「他伸手一推，」6 个字时被判成稳定完成（2026-11-25 回归测试踩到）。
+   DS 的探针没有 streaming 字段（undefined），这条对它不生效。 */
+    if (stable >= 4 && snap.streaming !== true) {
+      /* 页面在后台时 Gemini 的渲染被节流，正文只吐出十来个字就不动了，
+         这时候收工会拿到半截（2026-11-25 实测：只收 8~11 个字）。
+         先把标签提到前台，重置稳定计数，等它可见后再重新判完成。 */
+      if (snap.vis === 'hidden') {
+        await cdp.send('Page.bringToFront').catch(() => {})
+        if (Date.now() - lastFront > 15000) {
+          lastFront = Date.now()
+          await bringChromeToFront().catch(() => {})
+        }
+        if (!hiddenSince) hiddenSince = Date.now()
+        /* 兜底：90 秒都提不起来（窗口被别的程序压着、或用户最小化了），
+           按当前内容收工并留警告，免得整段等到超时白跑 */
+        if (Date.now() - hiddenSince > 90000 && latest.length > 0) {
+          log(job, '提示：页面一直不可见，已按当前内容收工（可能不完整），建议复核')
+          return { text: latest, done: true, hiddenStuck: true }
+        }
+        stable = 0
+        job.stage = `第 ${part.index + 1} 段 · 页面在后台，提到前台再收（${part.elapsed}s）`
+        continue
+      }
       /* 必须确认这次真的多出一条新消息：Gemini 在 /app 导航后会短暂残留上一会话的正文，
          只看「文字稳定」会把旧内容当成本次回复（踩过：new 模式抓到上一章正文）。 */
       const grew = typeof before.mains === 'number' && typeof snap.mains === 'number' ? snap.mains > before.mains : true
-      if (!grew) {
+      /* DeepSeek 的新回复不增加正文节点数（虚拟滚动/复用节点），只靠「条数变多」永远判不完成。
+       对它放宽成：条数变多，或者末尾正文确实变了（changed 在上面已经算过）。 */
+    const backendNow = String((job.options && job.options.backend) || '')
+    const grewForBackend = grew || (backendNow === 'deepseek' && changed === true)
+    if (!grewForBackend) {
         stable = 0
         job.stage = `第 ${part.index + 1} 段 · 等新回复出现（页面仍停在发送前状态，${part.elapsed}s）`
         continue
       }
       if (latest.length >= job.options.minChars) return { text: latest, done: true }
-      if (stable >= 8) return { text: latest, done: true, short: true }
+      /* 短回复兜底要更保守：页面在后台（hidden）时 Gemini 的渲染会被节流，
+       正文只吐出「他抬手抵住门扉，」八个字也会连续不变，8 次就收会拿到半截。
+       改成：可见时 12 次、隐藏时 16 次，且至少等了 30 秒才允许按短回复收工。 */
+      const hiddenNow = snap.vis === 'hidden'
+      const shortLimit = hiddenNow ? 16 : 12
+      if (stable >= shortLimit && part.elapsed >= 30) return { text: latest, done: true, short: true }
     }
   }
   return { text: latest, timedOut: true }
