@@ -64,7 +64,11 @@ const DEFAULT_GEMINI = 'https://gemini.google.com/app'
 const PROBE_GEMINI = `(() => {
   const models = [...document.querySelectorAll('message-content')];
   /* 不要在这里写 \n —— 模板字符串会把它变成真换行，页面拿到的是语法错误 */
-  const last = models.length ? (models[models.length - 1].textContent || '').trim() : '';
+  /* 认 innerText，不认 textContent：Gemini 的回复是 <p> 段落渲染的，
+     textContent 只拼文字节点、一个换行都不补，落盘就变成一整行（2026-11-25 墨卿用 016 有 40 个换行、017-020 为 0 的数据定位到）。
+     innerText 会按渲染结果补 \n；取不到时再退回 textContent。 */
+  const lastNode = models.length ? models[models.length - 1] : null
+  const last = lastNode ? String(lastNode.innerText || lastNode.textContent || '').trim() : '';
   const ed = document.querySelector('.ql-editor[contenteditable="true"], rich-textarea [contenteditable="true"], [contenteditable="true"][role="textbox"], textarea');
   const stop = document.querySelector('button[aria-label*="停止"], button[aria-label*="Stop"]');
   const signedOut = /accounts\\.google\\.com/.test(location.href) || (!!document.querySelector('a[href*="accounts.google.com"]') && !ed);
