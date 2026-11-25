@@ -1,0 +1,44 @@
+{
+  "name": "dsh-webgen-polish",
+  "version": "4.3.11",
+  "type": "module",
+  "description": "网页版分段润色（只做文字）：DeepSeek / Gemini / Venice 三后端并行，整段不切、阻塞等待、跨段重复检测与硬约束自检。生图已分离到 dsh-venice-image。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "checks.js",
+    "cordis.patch.yml.example",
+    "README.md",
+    "LICENSE",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "polish",
+    "chinese",
+    "web-novel"
+  ]
+}

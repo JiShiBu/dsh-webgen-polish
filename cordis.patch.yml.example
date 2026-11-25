@@ -1,0 +1,19 @@
+# 复制为 cordis.patch.yml 后按需修改。
+# 注意：cordis.patch.yml 已在 .gitignore 里，真实配置（含你的会话地址与路径）不要提交。
+- insert:
+    - id: webgen-polish
+      name: dsh-webgen-polish
+      config:
+        # Chrome 远程调试端口（插件通过它连浏览器）
+        port: 9333
+        # 目标会话。给根地址或新会话入口＝「不导航，用当前标签页」
+        chatUrl: 'https://chat.deepseek.com/'
+        geminiUrl: 'https://gemini.google.com/app/'
+        veniceUrl: 'https://venice.ai/chat/agent'
+        # 产物目录
+        outDir: 'D:\polish-output'
+        # 单段等待上限（长文建议 900 以上）
+        timeoutSec: 900
+        # Chrome 可执行文件与自动化专用配置目录（登录状态在这里）
+        chromePath: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+        profileDir: 'C:\Users\你\.dsh\webgen-profile'

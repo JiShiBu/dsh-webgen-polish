@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Web Polish Pipeline",
+    "description": "Split a chapter into four parts and feed them one by one into a fixed chat.deepseek.com session, with live progress for every part."
+  }
+}
